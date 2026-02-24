@@ -37,6 +37,7 @@ cargo run -p vibetorio-app
 - Keep fixed-timestep behavior explicit; avoid frame-rate dependent simulation changes.
 - Use plain data for recipes, entities, and machine tuning.
 - Capture milestones and decisions in `PLAN.md`.
+- See `docs/determinism.md` for lockstep protocol rules and CI sync expectations.
 
 ## License
 

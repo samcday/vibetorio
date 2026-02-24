@@ -34,6 +34,9 @@ jobs:
       - name: Run tests
         run: cargo test --workspace
 
+      - name: Run lockstep replay smoke test
+        run: cargo test -p vibetorio-sim lockstep_replay_trace_from_fixture_stays_in_sync
+
       - name: Run clippy
         run: cargo clippy --workspace --all-targets -- -D warnings
 

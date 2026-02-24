@@ -8,6 +8,7 @@ use std::collections::hash_map::DefaultHasher;
 pub const DEFAULT_TICKS_PER_SECOND: u32 = 60;
 pub const CHUNK_SIZE: i32 = 16;
 pub const DEFAULT_COMMAND_QUEUE_CAPACITY: usize = 128;
+pub const LOCKSTEP_PROTOCOL_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum EntityFacing {
@@ -399,7 +400,7 @@ impl WorldGrid {
     }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum SimulationCommand {
     PlaceEntity {
         entity_type: String,
@@ -428,11 +429,176 @@ pub enum SimulationCommand {
     SetTickRate(u32),
 }
 
-#[derive(Debug, Default, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockstepInput {
+    pub protocol_version: u32,
+    pub tick: u64,
+    pub client_id: u16,
+    pub sequence: u32,
+    pub command: SimulationCommand,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub enum LockstepPacket {
+    Handshake {
+        protocol_version: u32,
+        client_id: u16,
+    },
+    Input(LockstepInput),
+    Snapshot {
+        tick: u64,
+        state_hash: u64,
+    },
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct LockstepReplaySnapshotExpectation {
+    pub tick: u64,
+    pub expected_entity_count: u32,
+    pub expected_chunk_count: u32,
+    pub expected_state_hash: Option<u64>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LockstepReplayTrace {
+    pub protocol_version: u32,
+    pub start_tick: u64,
+    pub start_ticks_per_second: u32,
+    pub commands: Vec<LockstepInput>,
+    pub snapshots: Vec<LockstepReplaySnapshotExpectation>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LockstepReplaySnapshot {
+    pub tick: u64,
+    pub entity_count: u32,
+    pub chunk_count: u32,
+    pub state_hash: u64,
+}
+
+pub fn run_lockstep_replay_trace(
+    trace: &LockstepReplayTrace,
+    world: &mut WorldGrid,
+    config: &mut SimulationConfig,
+    clock: &mut SimulationClock,
+    stats: &mut SimulationCommandStats,
+) -> Vec<LockstepReplaySnapshot> {
+    let last_command_tick = trace
+        .commands
+        .iter()
+        .map(|input| input.tick)
+        .max()
+        .unwrap_or(trace.start_tick);
+    let max_tick = last_command_tick;
+
+    clock.tick = trace.start_tick;
+    config.ticks_per_second = trace.start_ticks_per_second;
+
+    let mut observations = Vec::new();
+
+    for tick in trace.start_tick..=max_tick {
+        apply_lockstep_inputs_for_tick(tick, &trace.commands, world, config, stats);
+        clock.tick = clock.tick.saturating_add(1);
+
+        let snapshot = LockstepReplaySnapshot {
+            tick: clock.tick,
+            entity_count: world.entity_count(),
+            chunk_count: world.chunk_count(),
+            state_hash: deterministic_sim_state_hash(clock, config, world),
+        };
+
+        observations.push(snapshot);
+    }
+
+    observations
+}
+
+pub fn check_lockstep_replay_trace(
+    trace: &LockstepReplayTrace,
+    world: &mut WorldGrid,
+    config: &mut SimulationConfig,
+    clock: &mut SimulationClock,
+    stats: &mut SimulationCommandStats,
+) -> bool {
+    let mut expected = trace.snapshots.clone();
+    expected.sort_unstable_by(|left, right| left.tick.cmp(&right.tick));
+
+    let observed = run_lockstep_replay_trace(trace, world, config, clock, stats);
+    let mut by_tick = std::collections::HashMap::new();
+    for snapshot in observed {
+        by_tick.insert(snapshot.tick, snapshot);
+    }
+
+    for expected_snapshot in expected {
+        let Some(observed_snapshot) = by_tick.get(&expected_snapshot.tick) else {
+            return false;
+        };
+
+        if expected_snapshot.expected_entity_count != observed_snapshot.entity_count {
+            return false;
+        }
+
+        if expected_snapshot.expected_chunk_count != observed_snapshot.chunk_count {
+            return false;
+        }
+
+        if let Some(expected_state_hash) = expected_snapshot.expected_state_hash
+            && expected_state_hash != observed_snapshot.state_hash
+        {
+            return false;
+        }
+    }
+
+    true
+}
+
+#[derive(Debug, Default, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct SimulationCommandStats {
     pub processed: u64,
     pub rejected: u64,
     pub dropped: u64,
+}
+
+pub fn encode_lockstep_packet(packet: &LockstepPacket) -> Result<String, serde_json::Error> {
+    serde_json::to_string(packet)
+}
+
+pub fn decode_lockstep_packet(payload: &str) -> Result<LockstepPacket, serde_json::Error> {
+    serde_json::from_str(payload)
+}
+
+pub fn canonicalize_lockstep_inputs(mut inputs: Vec<LockstepInput>) -> Vec<LockstepInput> {
+    inputs.sort_unstable_by(|a, b| {
+        a.tick
+            .cmp(&b.tick)
+            .then_with(|| a.client_id.cmp(&b.client_id))
+            .then_with(|| a.sequence.cmp(&b.sequence))
+    });
+
+    inputs
+}
+
+pub fn apply_lockstep_inputs_for_tick(
+    tick: u64,
+    inputs: &[LockstepInput],
+    world: &mut WorldGrid,
+    config: &mut SimulationConfig,
+    stats: &mut SimulationCommandStats,
+) {
+    let batch = inputs
+        .iter()
+        .filter(|input| input.tick == tick)
+        .filter(|input| input.protocol_version == LOCKSTEP_PROTOCOL_VERSION)
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for input in canonicalize_lockstep_inputs(batch) {
+        if apply_command(input.command, world, config).is_ok() {
+            stats.processed = stats.processed.saturating_add(1);
+        } else {
+            stats.rejected = stats.rejected.saturating_add(1);
+        }
+    }
 }
 
 #[derive(Default, Resource, Serialize, Deserialize)]
@@ -1005,6 +1171,192 @@ mod tests {
             deterministic_sim_state_hash(&clock_a, &config_a, &world_a),
             deterministic_sim_state_hash(&clock_b, &config_b, &world_b)
         );
+    }
+
+    #[test]
+    fn lockstep_packet_roundtrip_is_stable() {
+        let input = LockstepInput {
+            protocol_version: LOCKSTEP_PROTOCOL_VERSION,
+            tick: 12,
+            client_id: 7,
+            sequence: 4,
+            command: SimulationCommand::SetTickRate(45),
+        };
+
+        let encoded =
+            encode_lockstep_packet(&LockstepPacket::Input(input.clone())).expect("serialize input");
+        let decoded = decode_lockstep_packet(&encoded).expect("deserialize input");
+
+        assert_eq!(decoded, LockstepPacket::Input(input));
+    }
+
+    #[test]
+    fn two_clients_stay_in_sync_with_jittered_transport() {
+        let mut client_one_inputs = Vec::new();
+        let mut client_two_inputs = Vec::new();
+
+        let mut sequence_one: u32 = 0;
+        let mut sequence_two: u32 = 0;
+
+        client_one_inputs.push(LockstepInput {
+            protocol_version: LOCKSTEP_PROTOCOL_VERSION,
+            tick: 0,
+            client_id: 1,
+            sequence: sequence_one,
+            command: SimulationCommand::SetTickRate(30),
+        });
+        sequence_one = sequence_one.saturating_add(1);
+
+        client_two_inputs.push(LockstepInput {
+            protocol_version: LOCKSTEP_PROTOCOL_VERSION,
+            tick: 0,
+            client_id: 2,
+            sequence: sequence_two,
+            command: SimulationCommand::SetTickRate(45),
+        });
+        sequence_two = sequence_two.saturating_add(1);
+
+        for tick in 1..=8 {
+            client_one_inputs.push(LockstepInput {
+                protocol_version: LOCKSTEP_PROTOCOL_VERSION,
+                tick,
+                client_id: 1,
+                sequence: sequence_one,
+                command: SimulationCommand::PlaceEntity {
+                    entity_type: "belt".to_string(),
+                    x: tick as i32,
+                    y: 0,
+                    width: 1,
+                    height: 1,
+                    facing: EntityFacing::North,
+                },
+            });
+            sequence_one = sequence_one.saturating_add(1);
+
+            client_two_inputs.push(LockstepInput {
+                protocol_version: LOCKSTEP_PROTOCOL_VERSION,
+                tick,
+                client_id: 2,
+                sequence: sequence_two,
+                command: SimulationCommand::PlaceEntity {
+                    entity_type: "drill".to_string(),
+                    x: tick as i32,
+                    y: 1,
+                    width: 1,
+                    height: 1,
+                    facing: EntityFacing::North,
+                },
+            });
+            sequence_two = sequence_two.saturating_add(1);
+        }
+
+        let mut client_one_wire = Vec::new();
+        let mut client_two_wire = Vec::new();
+
+        for tick in 0..=8 {
+            let packet_one = encode_lockstep_packet(&LockstepPacket::Input(
+                client_one_inputs[tick as usize].clone(),
+            ))
+            .expect("serialize client one command");
+            let packet_two = encode_lockstep_packet(&LockstepPacket::Input(
+                client_two_inputs[tick as usize].clone(),
+            ))
+            .expect("serialize client two command");
+
+            client_one_wire.push(packet_one.clone());
+            client_one_wire.push(packet_two.clone());
+
+            client_two_wire.push(packet_two);
+            client_two_wire.push(packet_one);
+        }
+
+        let client_one_arrival: Vec<LockstepInput> = client_one_wire
+            .into_iter()
+            .map(
+                |raw| match decode_lockstep_packet(&raw).expect("deserialize") {
+                    LockstepPacket::Input(input) => input,
+                    _ => panic!("unexpected packet for command payload"),
+                },
+            )
+            .collect();
+
+        let client_two_arrival: Vec<LockstepInput> = client_two_wire
+            .into_iter()
+            .map(
+                |raw| match decode_lockstep_packet(&raw).expect("deserialize") {
+                    LockstepPacket::Input(input) => input,
+                    _ => panic!("unexpected packet for command payload"),
+                },
+            )
+            .collect();
+
+        let mut world_one = WorldGrid::default();
+        let mut world_two = WorldGrid::default();
+        let mut config_one = SimulationConfig::default();
+        let mut config_two = SimulationConfig::default();
+        let mut clock_one = SimulationClock::default();
+        let mut clock_two = SimulationClock::default();
+        let mut stats_one = SimulationCommandStats::default();
+        let mut stats_two = SimulationCommandStats::default();
+
+        for tick in 0..=8 {
+            apply_lockstep_inputs_for_tick(
+                tick,
+                &client_one_arrival,
+                &mut world_one,
+                &mut config_one,
+                &mut stats_one,
+            );
+
+            apply_lockstep_inputs_for_tick(
+                tick,
+                &client_two_arrival,
+                &mut world_two,
+                &mut config_two,
+                &mut stats_two,
+            );
+
+            clock_one.tick = clock_one.tick.saturating_add(1);
+            clock_two.tick = clock_two.tick.saturating_add(1);
+
+            assert_eq!(
+                deterministic_sim_state_hash(&clock_one, &config_one, &world_one),
+                deterministic_sim_state_hash(&clock_two, &config_two, &world_two),
+            );
+            assert_eq!(world_one.entity_count(), world_two.entity_count());
+            assert_eq!(world_one.chunk_count(), world_two.chunk_count());
+        }
+
+        assert_eq!(stats_one, stats_two);
+        assert_eq!(stats_one.processed, 18);
+        assert_eq!(stats_one.rejected, 0);
+        assert_eq!(clock_one.tick, 9);
+        assert_eq!(config_one.ticks_per_second, 45);
+    }
+
+    #[test]
+    fn lockstep_replay_trace_from_fixture_stays_in_sync() {
+        let fixture: LockstepReplayTrace =
+            serde_json::from_str(include_str!("../tests/fixtures/lockstep_replay_trace.json"))
+                .expect("fixture should decode");
+
+        let mut world = WorldGrid::default();
+        let mut config = SimulationConfig::default();
+        let mut clock = SimulationClock::default();
+        let mut stats = SimulationCommandStats::default();
+
+        assert!(check_lockstep_replay_trace(
+            &fixture,
+            &mut world,
+            &mut config,
+            &mut clock,
+            &mut stats,
+        ));
+
+        assert_eq!(clock.tick, 6);
+        assert_eq!(config.ticks_per_second, 45);
+        assert_eq!(world.entity_count(), 1);
+        assert_eq!(world.chunk_count(), 1);
     }
 
     #[test]

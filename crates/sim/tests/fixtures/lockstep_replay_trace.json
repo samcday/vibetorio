@@ -1,0 +1,123 @@
+{
+  "protocol_version": 1,
+  "start_tick": 0,
+  "start_ticks_per_second": 30,
+  "commands": [
+    {
+      "protocol_version": 1,
+      "tick": 0,
+      "client_id": 1,
+      "sequence": 0,
+      "command": {
+        "SetTickRate": 45
+      }
+    },
+    {
+      "protocol_version": 1,
+      "tick": 1,
+      "client_id": 1,
+      "sequence": 1,
+      "command": {
+        "PlaceEntity": {
+          "entity_type": "belt",
+          "x": 0,
+          "y": 0,
+          "width": 1,
+          "height": 1,
+          "facing": "North"
+        }
+      }
+    },
+    {
+      "protocol_version": 1,
+      "tick": 2,
+      "client_id": 2,
+      "sequence": 0,
+      "command": {
+        "PlaceEntity": {
+          "entity_type": "drill",
+          "x": 1,
+          "y": 0,
+          "width": 1,
+          "height": 1,
+          "facing": "North"
+        }
+      }
+    },
+    {
+      "protocol_version": 1,
+      "tick": 3,
+      "client_id": 1,
+      "sequence": 2,
+      "command": {
+        "MoveEntity": {
+          "entity_id": 1,
+          "x": 4,
+          "y": 0
+        }
+      }
+    },
+    {
+      "protocol_version": 1,
+      "tick": 4,
+      "client_id": 2,
+      "sequence": 1,
+      "command": {
+        "RotateEntity": {
+          "entity_id": 2,
+          "times": 1
+        }
+      }
+    },
+    {
+      "protocol_version": 1,
+      "tick": 5,
+      "client_id": 1,
+      "sequence": 3,
+      "command": {
+        "RemoveEntity": {
+          "x": 4,
+          "y": 0
+        }
+      }
+    }
+  ],
+  "snapshots": [
+    {
+      "tick": 1,
+      "expected_entity_count": 0,
+      "expected_chunk_count": 0,
+      "expected_state_hash": null
+    },
+    {
+      "tick": 2,
+      "expected_entity_count": 1,
+      "expected_chunk_count": 1,
+      "expected_state_hash": null
+    },
+    {
+      "tick": 3,
+      "expected_entity_count": 2,
+      "expected_chunk_count": 1,
+      "expected_state_hash": null
+    },
+    {
+      "tick": 4,
+      "expected_entity_count": 2,
+      "expected_chunk_count": 1,
+      "expected_state_hash": null
+    },
+    {
+      "tick": 5,
+      "expected_entity_count": 2,
+      "expected_chunk_count": 1,
+      "expected_state_hash": null
+    },
+    {
+      "tick": 6,
+      "expected_entity_count": 1,
+      "expected_chunk_count": 1,
+      "expected_state_hash": null
+    }
+  ]
+}
