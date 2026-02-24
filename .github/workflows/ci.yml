@@ -21,7 +21,6 @@ jobs:
         with:
           toolchain: 1.93.0
           components: clippy rustfmt
-          cache: true
 
       - name: Check formatting
         run: cargo fmt --all -- --check
