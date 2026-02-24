@@ -1,0 +1,5 @@
+channel: "1.93.0"
+components:
+  - clippy
+  - rust-src
+  - rustfmt

@@ -38,6 +38,7 @@ This file captures the operating rules for all contributors and automation agent
 - During `ELONGMODE`, treat `PLAN.md` as the execution plan and drive milestones to completion.
 - Work strictly one feature branch at a time and gate each branch through a GitHub PR with `@codex review`.
 - Use `gh` for branch management and GitHub operations; keep PRs narrow in scope.
+- If there are no actionable PRs awaiting `@codex review` feedback, pick the next unclaimed milestone task and start it on a new branch that is not already active.
 
 ## Contribution Notes
 
